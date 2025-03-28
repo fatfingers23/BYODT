@@ -130,7 +130,7 @@ async fn run_display(
         // Have to always update the display or it crashes. Faster fps (lower sleep) helps keep the process down
         // Get to high enough and it will crash
         // And if it's too high keypresses are missed
-        sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_millis(250)).await;
     }
 }
 
