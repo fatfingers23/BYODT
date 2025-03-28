@@ -1,7 +1,8 @@
-use anyhow::{Ok, Result, anyhow};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use dotenv::dotenv;
 use embedded_graphics::{image::Image, pixelcolor::BinaryColor, prelude::*};
+use embedded_graphics_simulator::SimulatorEvent;
 use embedded_graphics_simulator::{
     BinaryColorTheme, OutputSettingsBuilder, SimulatorDisplay, Window,
 };
@@ -14,8 +15,7 @@ use std::time::Duration;
 use tinybmp::Bmp;
 use tokio::signal;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::sync::oneshot;
-use tokio::time::interval;
+use tokio::time::sleep;
 mod models;
 
 static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
@@ -58,55 +58,62 @@ async fn main() -> Result<()> {
     };
 
     // I think 1 will be fine for now, but I might need to increase this later
-    let (tx, rx) = mpsc::channel::<Message>(1);
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (tx, rx) = mpsc::channel::<Message>(5);
+
+    tokio::spawn(async move {
+        let _ = web_calls(tx, args).await;
+    });
 
     //TODO still not working need to close window first to close
     tokio::select! {
         _ = signal::ctrl_c() => {
             info!("Ctrl-C received, shutting down");
-            shutdown_tx.send(()).unwrap();
+            // shutdown_tx.send(()).unwrap();
             return Ok(());
         },
-        _ = web_calls(tx, args) => {},
-        _ = run_display(rx, shutdown_rx) => {},
+        // _ = web_calls(tx, args) => {},
+        _ = run_display(rx) => {},
     }
 
     Ok(())
 }
 
-async fn run_display(
-    mut rx: mpsc::Receiver<Message>,
-    shutdown_rx: oneshot::Receiver<()>,
-) -> Result<()> {
+async fn run_display(mut rx: mpsc::Receiver<Message>) -> Result<()> {
     let output_settings = OutputSettingsBuilder::new()
         .scale(1)
+        .pixel_spacing(1)
         .theme(BinaryColorTheme::Default)
         .build();
     let mut window = Window::new("TRMNL", &output_settings);
     let mut display = SimulatorDisplay::<BinaryColor>::new(Size::new(800, 480));
 
-    tokio::select! {
-        _ = shutdown_rx => {
-            info!("Shutdown signal received, exiting display loop");
-            return Ok(());
-        },
-        _ = async {
-            while let Some(message) = rx.recv().await {
+    loop {
+        _ = match rx.try_recv() {
+            Ok(message) => {
+                // Handle the successful case here
+                info!("Successfully received a message");
                 match message {
                     Message::NewImage(bmp_bytes) => {
                         info!("New display update received");
                         let bmp = Bmp::<BinaryColor>::from_slice(&bmp_bytes).unwrap();
                         let _ = Image::new(&bmp, Point::zero()).draw(&mut display);
-                        window.show_static(&display);
                     }
                 }
             }
-            info!("Channel has been closed, can end the process");
-        } => {},
-    }
+            Err(_) => {}
+        };
 
-    Ok(())
+        window.update(&display);
+
+        for event in window.events() {
+            match event {
+                SimulatorEvent::Quit => break,
+
+                _ => {}
+            }
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
 }
 
 async fn web_calls(sender: Sender<Message>, config: ApiArguments) -> Result<()> {
@@ -120,12 +127,15 @@ async fn web_calls(sender: Sender<Message>, config: ApiArguments) -> Result<()> 
         .default_headers(headers)
         .build()?;
 
-    let mut tick_interval = interval(Duration::from_secs(600));
-
+    let mut sleep_time = 600;
+    let mut first_run = true;
     loop {
-        let sleep_time = tick_interval.period().as_secs();
-        info!("Sleeping for {} seconds", sleep_time);
-        tick_interval.tick().await;
+        if !first_run {
+            info!("Sleeping for {} seconds", sleep_time);
+            sleep(Duration::from_secs(sleep_time)).await;
+        } else {
+            first_run = false;
+        }
 
         let result = client
             .get(format!("{}/api/display", config.base_url))
@@ -149,7 +159,7 @@ async fn web_calls(sender: Sender<Message>, config: ApiArguments) -> Result<()> 
         info!("{parse_result:#?}");
 
         let resp = parse_result?;
-        //Not sure on a successful one yet
+        //Not sure on a successful one yet. I think its 0
         if resp.status == 500 {
             match resp.error {
                 Some(err_msg) => {
@@ -181,15 +191,10 @@ async fn web_calls(sender: Sender<Message>, config: ApiArguments) -> Result<()> 
 
         match resp.refresh_rate {
             Some(refresh_rate) => {
-                // info!(
-                //     "Sleeping for {} seconds since that's what the api asked for.",
-                //     refresh_rate
-                // );
-
-                tick_interval = interval(Duration::from_secs(refresh_rate));
-                tick_interval.tick().await;
+                sleep_time = refresh_rate;
             }
             None => {
+                sleep_time = 600;
                 info!("No refresh rate from api, sleeping for 10mins")
             }
         }
