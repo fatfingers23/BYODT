@@ -46,13 +46,22 @@ async fn main() -> Result<()> {
     let env_api_key = std::env::var("API_KEY");
     let env_base_url = std::env::var("API_URL_BASE");
 
-    let args = ApiArguments::parse();
+    let args = if env_api_key.is_ok() && env_base_url.is_ok() {
+        info!("Using API_KEY and API_URL_BASE from environment variables");
+        ApiArguments {
+            api_key: env_api_key.unwrap(),
+            base_url: env_base_url.unwrap(),
+        }
+    } else {
+        info!("Using command-line arguments for API_KEY and API_URL_BASE");
+        ApiArguments::parse()
+    };
 
     // I think 1 will be fine for now, but I might need to increase this later
     let (tx, rx) = mpsc::channel::<Message>(1);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-    //TODO still not working need to close window first
+    //TODO still not working need to close window first to close
     tokio::select! {
         _ = signal::ctrl_c() => {
             info!("Ctrl-C received, shutting down");
